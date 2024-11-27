@@ -1,5 +1,7 @@
 /* eslint-disable import/extensions, import/no-absolute-path */
 import { SQSHandler } from "aws-lambda";
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import { DynamoDBDocumentClient, PutCommand } from "@aws-sdk/lib-dynamodb";
 import {
   GetObjectCommand,
   PutObjectCommandInput,
@@ -7,8 +9,10 @@ import {
   S3Client,
   PutObjectCommand,
 } from "@aws-sdk/client-s3";
+import { console } from "inspector";
 
 const s3 = new S3Client();
+const ddbDocClient = createDDbDocClient();
 
 export const handler: SQSHandler = async (event) => {
   console.log("Event ", JSON.stringify(event));
@@ -23,15 +27,31 @@ export const handler: SQSHandler = async (event) => {
         const srcBucket = s3e.bucket.name;
         // Object key may have spaces or unicode non-ASCII characters.
         const srcKey = decodeURIComponent(s3e.object.key.replace(/\+/g, " "));
+
         let origimage = null;
+
+        if (!srcKey.endsWith(".jpeg") && !srcKey.endsWith(".png")) {
+          throw new Error("Bad Image");
+        }
+        
         try {
+
           // Download the image from the S3 source bucket.
           const params: GetObjectCommandInput = {
             Bucket: srcBucket,
             Key: srcKey,
           };
+
           origimage = await s3.send(new GetObjectCommand(params));
-          // Process the image ......
+
+          ddbDocClient.send(
+            new PutCommand({
+              TableName: process.env.TABLE_NAME,
+              Item: {
+                imageId: srcKey
+              }
+            })
+          );
         } catch (error) {
           console.log(error);
         }
@@ -39,3 +59,17 @@ export const handler: SQSHandler = async (event) => {
     }
   }
 };
+
+function createDDbDocClient() {
+  const ddbClient = new DynamoDBClient({ region: process.env.REGION });
+  const marshallOptions = {
+    convertEmptyValues: true,
+    removeUndefinedValues: true,
+    convertClassInstanceToMap: true,
+  };
+  const unmarshallOptions = {
+    wrapNumbers: false,
+  };
+  const translateConfig = { marshallOptions, unmarshallOptions };
+  return DynamoDBDocumentClient.from(ddbClient, translateConfig);
+}

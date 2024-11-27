@@ -8,6 +8,12 @@ import * as sqs from "aws-cdk-lib/aws-sqs";
 import * as sns from "aws-cdk-lib/aws-sns";
 import * as subs from "aws-cdk-lib/aws-sns-subscriptions";
 import * as iam from "aws-cdk-lib/aws-iam";
+import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
+import { SqsEventSource } from "aws-cdk-lib/aws-lambda-event-sources";
+import { Duration, RemovalPolicy } from "aws-cdk-lib";
+import { StreamViewType } from "aws-cdk-lib/aws-dynamodb";
+import { DynamoEventSource } from "aws-cdk-lib/aws-lambda-event-sources";
+import { StartingPosition } from "aws-cdk-lib/aws-lambda";
 
 import { Construct } from "constructs";
 // import * as sqs from 'aws-cdk-lib/aws-sqs';
@@ -21,13 +27,33 @@ export class EDAAppStack extends cdk.Stack {
       autoDeleteObjects: true,
       publicReadAccess: false,
     });
+
+    const imageTable = new dynamodb.Table(this, "ImageTable", {
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      partitionKey: { name: "imageId", type: dynamodb.AttributeType.STRING },
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      tableName: "Images",
+    });
     
 
     // Integration infrastructure
 
+    //////////// Dead Letter Queue /////////////
+
+    const badImageQueue = new sqs.Queue(this, "DLQ", {
+      retentionPeriod: Duration.minutes(10),
+    });
+
+    // Added Dead Letter Queue to Main SQS 
     const imageProcessQueue = new sqs.Queue(this, "img-created-queue", {
       receiveMessageWaitTime: cdk.Duration.seconds(10),
+      deadLetterQueue: {
+        queue: badImageQueue,
+        maxReceiveCount: 1,
+      }
     });
+
+    ////////////////////////////////////////////////
 
     const mailerQ = new sqs.Queue(this, "mailer-queue", {
       receiveMessageWaitTime: cdk.Duration.seconds(10),
@@ -56,15 +82,38 @@ export class EDAAppStack extends cdk.Stack {
       entry: `${__dirname}/../lambdas/processImage.ts`,
       timeout: cdk.Duration.seconds(15),
       memorySize: 128,
+      environment: {
+        TABLE_NAME: imageTable.tableName
+      }
     }
   );
 
-  const mailerFn = new lambdanode.NodejsFunction(this, "mailer-function", {
-    runtime: lambda.Runtime.NODEJS_16_X,
-    memorySize: 1024,
-    timeout: cdk.Duration.seconds(3),
-    entry: `${__dirname}/../lambdas/mailer.ts`,
-  });
+  const mailerFn = new lambdanode.NodejsFunction(
+    this, 
+    "mailer-function", 
+    {
+      runtime: lambda.Runtime.NODEJS_16_X,
+      memorySize: 1024,
+      timeout: cdk.Duration.seconds(3),
+      entry: `${__dirname}/../lambdas/mailer.ts`,
+    } 
+  );
+
+  //////////// RejectionMailer ////////////////////
+
+  const rejectionMailerFn = new lambdanode.NodejsFunction(
+    this, 
+    "rejectionMailer-function", 
+    {
+      runtime: lambda.Runtime.NODEJS_16_X,
+      memorySize: 1024,
+      timeout: cdk.Duration.seconds(3),
+      entry: `${__dirname}/../lambdas/rejectionMail.ts`,
+    } 
+  );
+
+
+  ////////////////////////////////////////////
 
   // S3 --> SQS
   imagesBucket.addEventNotification(
@@ -83,12 +132,21 @@ export class EDAAppStack extends cdk.Stack {
     maxBatchingWindow: cdk.Duration.seconds(5),
   }); 
 
+  // DLQ -- > Lambda
+
+  const newImageRejectionMail = new events.SqsEventSource(badImageQueue, {
+    batchSize: 5,
+    maxBatchingWindow: cdk.Duration.seconds(5),
+  })
+
+  rejectionMailerFn.addEventSource(newImageRejectionMail)
   processImageFn.addEventSource(newImageEventSource);
   mailerFn.addEventSource(newImageMailEventSource);
 
   // Permissions
 
   imagesBucket.grantRead(processImageFn);
+  imageTable.grantReadWriteData(processImageFn)
 
   mailerFn.addToRolePolicy(
     new iam.PolicyStatement({
@@ -101,6 +159,22 @@ export class EDAAppStack extends cdk.Stack {
       resources: ["*"],
     })
   );
+
+  //////////// RejectionMailer /////////////
+
+  rejectionMailerFn.addToRolePolicy(
+    new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        "ses:SendEmail",
+        "ses:SendRawEmail",
+        "ses:SendTemplatedEmail",
+      ],
+      resources: ["*"],
+    })
+  );
+
+  //////////////////////////////////////
 
     // Output
     
