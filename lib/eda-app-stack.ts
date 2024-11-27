@@ -59,6 +59,17 @@ export class EDAAppStack extends cdk.Stack {
       receiveMessageWaitTime: cdk.Duration.seconds(10),
     });
 
+    const confirmationMailerFn = new lambdanode.NodejsFunction(
+      this, 
+      "mailer-function", 
+      {
+        runtime: lambda.Runtime.NODEJS_16_X,
+        memorySize: 1024,
+        timeout: cdk.Duration.seconds(3),
+        entry: `${__dirname}/../lambdas/confirmationMailer.ts`,
+      } 
+    );
+
     // SNS topic
     const newImageTopic = new sns.Topic(this, "NewImageTopic", {
       displayName: "New Image topic",
@@ -69,7 +80,7 @@ export class EDAAppStack extends cdk.Stack {
     );
 
     newImageTopic.addSubscription(
-      new subs.SqsSubscription(mailerQ)
+      new subs.LambdaSubscription(confirmationMailerFn)
     );
 
   // Lambda functions
@@ -88,16 +99,7 @@ export class EDAAppStack extends cdk.Stack {
     }
   );
 
-  const mailerFn = new lambdanode.NodejsFunction(
-    this, 
-    "mailer-function", 
-    {
-      runtime: lambda.Runtime.NODEJS_16_X,
-      memorySize: 1024,
-      timeout: cdk.Duration.seconds(3),
-      entry: `${__dirname}/../lambdas/mailer.ts`,
-    } 
-  );
+  
 
   //////////// RejectionMailer ////////////////////
 
@@ -108,7 +110,7 @@ export class EDAAppStack extends cdk.Stack {
       runtime: lambda.Runtime.NODEJS_16_X,
       memorySize: 1024,
       timeout: cdk.Duration.seconds(3),
-      entry: `${__dirname}/../lambdas/rejectionMail.ts`,
+      entry: `${__dirname}/../lambdas/rejectionMailer.ts`,
     } 
   );
 
@@ -127,10 +129,10 @@ export class EDAAppStack extends cdk.Stack {
     maxBatchingWindow: cdk.Duration.seconds(5),
   });
 
-  const newImageMailEventSource = new events.SqsEventSource(mailerQ, {
-    batchSize: 5,
-    maxBatchingWindow: cdk.Duration.seconds(5),
-  }); 
+  // const newImageMailEventSource = new events.SqsEventSource(mailerQ, {
+  //   batchSize: 5,
+  //   maxBatchingWindow: cdk.Duration.seconds(5),
+  // }); 
 
   // DLQ -- > Lambda
 
@@ -141,14 +143,14 @@ export class EDAAppStack extends cdk.Stack {
 
   rejectionMailerFn.addEventSource(newImageRejectionMail)
   processImageFn.addEventSource(newImageEventSource);
-  mailerFn.addEventSource(newImageMailEventSource);
+  //mailerFn.addEventSource(newImageMailEventSource);
 
   // Permissions
 
   imagesBucket.grantRead(processImageFn);
   imageTable.grantReadWriteData(processImageFn)
 
-  mailerFn.addToRolePolicy(
+  confirmationMailerFn.addToRolePolicy(
     new iam.PolicyStatement({
       effect: iam.Effect.ALLOW,
       actions: [
