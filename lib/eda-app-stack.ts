@@ -34,11 +34,8 @@ export class EDAAppStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.DESTROY,
       tableName: "Images",
     });
-    
 
     // Integration infrastructure
-
-    //////////// Dead Letter Queue /////////////
 
     const badImageQueue = new sqs.Queue(this, "DLQ", {
       retentionPeriod: Duration.minutes(10),
@@ -53,135 +50,168 @@ export class EDAAppStack extends cdk.Stack {
       }
     });
 
-    ////////////////////////////////////////////////
+    // Lambda functions
 
-    const mailerQ = new sqs.Queue(this, "mailer-queue", {
-      receiveMessageWaitTime: cdk.Duration.seconds(10),
-    });
+    const appCommonFnProps = {
+      architecture: lambda.Architecture.ARM_64,
+      timeout: cdk.Duration.seconds(10),
+      memorySize: 128,
+      runtime: lambda.Runtime.NODEJS_18_X,
+      handler: "handler",
+      environment: {
+        TABLE_NAME: imageTable.tableName,
+        REGION: cdk.Aws.REGION,
+      },
+    };
+
+    const updateTable = new lambdanode.NodejsFunction(
+      this,
+      "updateTable",
+      {
+        runtime: lambda.Runtime.NODEJS_18_X,
+        entry: `${__dirname}/../lambdas/updateTable.ts`,
+        timeout: cdk.Duration.seconds(15),
+        memorySize: 128,
+        environment: {
+          TABLE_NAME: imageTable.tableName
+        }
+      }
+    );
+
+    const processImageFn = new lambdanode.NodejsFunction(
+      this,
+      "ProcessImageFn",
+      {
+        runtime: lambda.Runtime.NODEJS_18_X,
+        entry: `${__dirname}/../lambdas/processImage.ts`,
+        timeout: cdk.Duration.seconds(15),
+        memorySize: 128,
+        environment: {
+          TABLE_NAME: imageTable.tableName
+        }
+      }
+    );
+
+    const rejectionMailerFn = new lambdanode.NodejsFunction(
+      this,
+      "rejectionMailer-function",
+      {
+        runtime: lambda.Runtime.NODEJS_18_X,
+        memorySize: 1024,
+        timeout: cdk.Duration.seconds(3),
+        entry: `${__dirname}/../lambdas/rejectionMailer.ts`,
+      }
+    );
 
     const confirmationMailerFn = new lambdanode.NodejsFunction(
-      this, 
-      "mailer-function", 
+      this,
+      "mailer-function",
       {
-        runtime: lambda.Runtime.NODEJS_16_X,
+        runtime: lambda.Runtime.NODEJS_18_X,
         memorySize: 1024,
         timeout: cdk.Duration.seconds(3),
         entry: `${__dirname}/../lambdas/confirmationMailer.ts`,
-      } 
+      }
     );
 
     // SNS topic
     const newImageTopic = new sns.Topic(this, "NewImageTopic", {
       displayName: "New Image topic",
-    }); 
+    });
 
     newImageTopic.addSubscription(
-      new subs.SqsSubscription(imageProcessQueue)
+      new subs.SqsSubscription(imageProcessQueue,
+        {
+          filterPolicy: {
+            body: sns.SubscriptionFilter.existsFilter()
+          }
+        }
+      )
     );
 
     newImageTopic.addSubscription(
-      new subs.LambdaSubscription(confirmationMailerFn)
+      new subs.LambdaSubscription(confirmationMailerFn,
+        {
+          filterPolicy: {
+            metadata_type: sns.SubscriptionFilter.stringFilter({
+              denylist: ['Caption', 'Date', 'Photographer']
+            })
+          }
+        }
+      )
     );
 
-  // Lambda functions
+    newImageTopic.addSubscription(
+      new subs.LambdaSubscription(updateTable,
+        {
+          filterPolicy: {
+            metadata_type: sns.SubscriptionFilter.stringFilter({
+              allowlist: ['Caption', 'Date', 'Photographer']
+            })
+          }
+        }
+      )
+    );
 
-  const processImageFn = new lambdanode.NodejsFunction(
-    this,
-    "ProcessImageFn",
-    {
-      runtime: lambda.Runtime.NODEJS_18_X,
-      entry: `${__dirname}/../lambdas/processImage.ts`,
-      timeout: cdk.Duration.seconds(15),
-      memorySize: 128,
-      environment: {
-        TABLE_NAME: imageTable.tableName
-      }
-    }
-  );
+    // S3 --> SNS
+    imagesBucket.addEventNotification(
+      s3.EventType.OBJECT_CREATED,
+      new s3n.SnsDestination(newImageTopic)  // Changed
+    );
 
-  
+    // SQS --> Lambda
+    const newImageEventSource = new events.SqsEventSource(imageProcessQueue, {
+      batchSize: 5,
+      maxBatchingWindow: cdk.Duration.seconds(5),
+    });
 
-  //////////// RejectionMailer ////////////////////
-
-  const rejectionMailerFn = new lambdanode.NodejsFunction(
-    this, 
-    "rejectionMailer-function", 
-    {
-      runtime: lambda.Runtime.NODEJS_16_X,
-      memorySize: 1024,
-      timeout: cdk.Duration.seconds(3),
-      entry: `${__dirname}/../lambdas/rejectionMailer.ts`,
-    } 
-  );
-
-
-  ////////////////////////////////////////////
-
-  // S3 --> SQS
-  imagesBucket.addEventNotification(
-    s3.EventType.OBJECT_CREATED,
-    new s3n.SnsDestination(newImageTopic)  // Changed
-);
-
- // SQS --> Lambda
-  const newImageEventSource = new events.SqsEventSource(imageProcessQueue, {
-    batchSize: 5,
-    maxBatchingWindow: cdk.Duration.seconds(5),
-  });
-
-  // const newImageMailEventSource = new events.SqsEventSource(mailerQ, {
-  //   batchSize: 5,
-  //   maxBatchingWindow: cdk.Duration.seconds(5),
-  // }); 
-
-  // DLQ -- > Lambda
-
-  const newImageRejectionMail = new events.SqsEventSource(badImageQueue, {
-    batchSize: 5,
-    maxBatchingWindow: cdk.Duration.seconds(5),
-  })
-
-  rejectionMailerFn.addEventSource(newImageRejectionMail)
-  processImageFn.addEventSource(newImageEventSource);
-  //mailerFn.addEventSource(newImageMailEventSource);
-
-  // Permissions
-
-  imagesBucket.grantRead(processImageFn);
-  imageTable.grantReadWriteData(processImageFn)
-
-  confirmationMailerFn.addToRolePolicy(
-    new iam.PolicyStatement({
-      effect: iam.Effect.ALLOW,
-      actions: [
-        "ses:SendEmail",
-        "ses:SendRawEmail",
-        "ses:SendTemplatedEmail",
-      ],
-      resources: ["*"],
+    // DLQ -- > Lambda
+    const newImageRejectionMail = new events.SqsEventSource(badImageQueue, {
+      batchSize: 5,
+      maxBatchingWindow: cdk.Duration.seconds(5),
     })
-  );
 
-  //////////// RejectionMailer /////////////
+    rejectionMailerFn.addEventSource(newImageRejectionMail);
+    processImageFn.addEventSource(newImageEventSource);
 
-  rejectionMailerFn.addToRolePolicy(
-    new iam.PolicyStatement({
-      effect: iam.Effect.ALLOW,
-      actions: [
-        "ses:SendEmail",
-        "ses:SendRawEmail",
-        "ses:SendTemplatedEmail",
-      ],
-      resources: ["*"],
-    })
-  );
+    // Permissions
 
-  //////////////////////////////////////
+    imagesBucket.grantRead(processImageFn);
+    imageTable.grantReadWriteData(processImageFn)
+    imageTable.grantReadWriteData(updateTable)
+
+    confirmationMailerFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          "ses:SendEmail",
+          "ses:SendRawEmail",
+          "ses:SendTemplatedEmail",
+        ],
+        resources: ["*"],
+      })
+    );
+
+    rejectionMailerFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          "ses:SendEmail",
+          "ses:SendRawEmail",
+          "ses:SendTemplatedEmail",
+        ],
+        resources: ["*"],
+      })
+    );
 
     // Output
-    
+
     new cdk.CfnOutput(this, "bucketName", {
       value: imagesBucket.bucketName,
+    });
+
+    new cdk.CfnOutput(this, "topicARN", {
+      value: newImageTopic.topicArn,
     });
   }
 }

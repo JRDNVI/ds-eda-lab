@@ -9,7 +9,6 @@ import {
   S3Client,
   PutObjectCommand,
 } from "@aws-sdk/client-s3";
-import { console } from "inspector";
 
 const s3 = new S3Client();
 const ddbDocClient = createDDbDocClient();
