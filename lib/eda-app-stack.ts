@@ -33,6 +33,7 @@ export class EDAAppStack extends cdk.Stack {
       partitionKey: { name: "imageId", type: dynamodb.AttributeType.STRING },
       removalPolicy: cdk.RemovalPolicy.DESTROY,
       tableName: "Images",
+      stream: StreamViewType.NEW_AND_OLD_IMAGES,
     });
 
     // Integration infrastructure
@@ -121,23 +122,14 @@ export class EDAAppStack extends cdk.Stack {
 
     newImageTopic.addSubscription(
       new subs.SqsSubscription(imageProcessQueue,
-        {
-          filterPolicy: {
-            body: sns.SubscriptionFilter.existsFilter()
-          }
-        }
-      )
-    );
-
-    newImageTopic.addSubscription(
-      new subs.LambdaSubscription(confirmationMailerFn,
-        {
-          filterPolicy: {
-            metadata_type: sns.SubscriptionFilter.stringFilter({
-              denylist: ['Caption', 'Date', 'Photographer']
-            })
-          }
-        }
+        // {
+        //   filterPolicyWithMessageBody: {
+        //     // Define filters for the properties in the message body
+        //     Subject: new sns.Filter.s({
+        //        // Example: Only allow messages with Subject == "Amazon S3 Notification"
+        //     }),
+        //   }
+        // }
       )
     );
 
@@ -156,8 +148,13 @@ export class EDAAppStack extends cdk.Stack {
     // S3 --> SNS
     imagesBucket.addEventNotification(
       s3.EventType.OBJECT_CREATED,
-      new s3n.SnsDestination(newImageTopic)  // Changed
+      new s3n.SnsDestination(newImageTopic) 
     );
+
+    imagesBucket.addEventNotification(
+      s3.EventType.OBJECT_REMOVED_DELETE,
+      new s3n.SnsDestination(newImageTopic) // New
+    )
 
     // SQS --> Lambda
     const newImageEventSource = new events.SqsEventSource(imageProcessQueue, {
@@ -174,11 +171,20 @@ export class EDAAppStack extends cdk.Stack {
     rejectionMailerFn.addEventSource(newImageRejectionMail);
     processImageFn.addEventSource(newImageEventSource);
 
+    confirmationMailerFn.addEventSource(   ///////
+      new DynamoEventSource(imageTable, {
+        startingPosition: StartingPosition.LATEST,
+        batchSize: 5,
+        retryAttempts: 1,
+      })
+    )
+
     // Permissions
 
     imagesBucket.grantRead(processImageFn);
     imageTable.grantReadWriteData(processImageFn)
     imageTable.grantReadWriteData(updateTable)
+    imageTable.grantStreamRead(confirmationMailerFn); //
 
     confirmationMailerFn.addToRolePolicy(
       new iam.PolicyStatement({

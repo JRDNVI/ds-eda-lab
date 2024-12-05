@@ -1,10 +1,12 @@
-import { SNSHandler} from "aws-lambda";
+import { SNSHandler } from "aws-lambda";
 import { SES_EMAIL_FROM, SES_EMAIL_TO, SES_REGION } from "../env";
 import {
   SESClient,
   SendEmailCommand,
   SendEmailCommandInput,
 } from "@aws-sdk/client-ses";
+
+import type { DynamoDBStreamHandler } from "aws-lambda";
 
 if (!SES_EMAIL_TO || !SES_EMAIL_FROM || !SES_REGION) {
   throw new Error(
@@ -18,33 +20,24 @@ type ContactDetails = {
   message: string;
 };
 
-const client = new SESClient({ region: SES_REGION});
+const client = new SESClient({ region: SES_REGION });
 
-export const handler: SNSHandler = async (event: any) => {
+export const handler: DynamoDBStreamHandler = async (event: any) => {
   console.log("Event ", JSON.stringify(event));
   for (const record of event.Records) {
-    const snsMessage = JSON.parse(record.Sns.Message);
-
-    if (snsMessage.Records) {
-      console.log("Record body ", JSON.stringify(snsMessage));
-      for (const messageRecord of snsMessage.Records) {
-        const s3e = messageRecord.s3;
-        const srcBucket = s3e.bucket.name;
-        // Object key may have spaces or unicode non-ASCII characters.
-        const srcKey = decodeURIComponent(s3e.object.key.replace(/\+/g, " "));
-        try {
-          const { name, email, message }: ContactDetails = {
-            name: "The Photo Album",
-            email: SES_EMAIL_FROM,
-            message: `We received your Image. Its URL is s3://${srcBucket}/${srcKey}`,
-          };
-          const params = sendEmailParams({ name, email, message });
-          await client.send(new SendEmailCommand(params));
-        } catch (error: unknown) {
-          console.log("ERROR is: ", error);
-          // return;
-        }
-      }
+    const newImage = record.dynamodb?.NewImage;
+    const imageId = newImage.imageId?.S;
+    try {
+      const { name, email, message }: ContactDetails = {
+        name: "The Photo Album",
+        email: SES_EMAIL_FROM,
+        message: `We received your Image, ${imageId}. It has been uploaded to our database!`,
+      };
+      const params = sendEmailParams({ name, email, message });
+      await client.send(new SendEmailCommand(params));
+    } catch (error: unknown) {
+      console.log("ERROR is: ", error);
+      // return;
     }
   }
 };
@@ -86,7 +79,7 @@ function getHtmlContent({ name, email, message }: ContactDetails) {
   `;
 }
 
- // For demo purposes - not used here.
+// For demo purposes - not used here.
 function getTextContent({ name, email, message }: ContactDetails) {
   return `
     Received an Email. 📬
