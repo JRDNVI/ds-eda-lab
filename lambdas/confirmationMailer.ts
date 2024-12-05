@@ -1,4 +1,3 @@
-import { SNSHandler } from "aws-lambda";
 import { SES_EMAIL_FROM, SES_EMAIL_TO, SES_REGION } from "../env";
 import {
   SESClient,
@@ -24,9 +23,15 @@ const client = new SESClient({ region: SES_REGION });
 
 export const handler: DynamoDBStreamHandler = async (event: any) => {
   console.log("Event ", JSON.stringify(event));
+
   for (const record of event.Records) {
+    if (record.eventName === "REMOVE") {
+      return
+    }
+
     const newImage = record.dynamodb?.NewImage;
     const imageId = newImage.imageId?.S;
+
     try {
       const { name, email, message }: ContactDetails = {
         name: "The Photo Album",
@@ -37,7 +42,6 @@ export const handler: DynamoDBStreamHandler = async (event: any) => {
       await client.send(new SendEmailCommand(params));
     } catch (error: unknown) {
       console.log("ERROR is: ", error);
-      // return;
     }
   }
 };
@@ -76,16 +80,5 @@ function getHtmlContent({ name, email, message }: ContactDetails) {
         <p style="font-size:18px">${message}</p>
       </body>
     </html> 
-  `;
-}
-
-// For demo purposes - not used here.
-function getTextContent({ name, email, message }: ContactDetails) {
-  return `
-    Received an Email. 📬
-    Sent from:
-        👤 ${name}
-        ✉️ ${email}
-    ${message}
   `;
 }

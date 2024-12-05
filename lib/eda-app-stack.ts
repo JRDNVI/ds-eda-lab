@@ -9,14 +9,11 @@ import * as sns from "aws-cdk-lib/aws-sns";
 import * as subs from "aws-cdk-lib/aws-sns-subscriptions";
 import * as iam from "aws-cdk-lib/aws-iam";
 import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
-import { SqsEventSource } from "aws-cdk-lib/aws-lambda-event-sources";
-import { Duration, RemovalPolicy } from "aws-cdk-lib";
+import { Duration } from "aws-cdk-lib";
 import { StreamViewType } from "aws-cdk-lib/aws-dynamodb";
 import { DynamoEventSource } from "aws-cdk-lib/aws-lambda-event-sources";
 import { StartingPosition } from "aws-cdk-lib/aws-lambda";
-
 import { Construct } from "constructs";
-// import * as sqs from 'aws-cdk-lib/aws-sqs';
 
 export class EDAAppStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
@@ -36,8 +33,6 @@ export class EDAAppStack extends cdk.Stack {
       stream: StreamViewType.NEW_AND_OLD_IMAGES,
     });
 
-    // Integration infrastructure
-
     const badImageQueue = new sqs.Queue(this, "DLQ", {
       retentionPeriod: Duration.minutes(10),
     });
@@ -52,7 +47,6 @@ export class EDAAppStack extends cdk.Stack {
     });
 
     // Lambda functions
-
     const appCommonFnProps = {
       architecture: lambda.Architecture.ARM_64,
       timeout: cdk.Duration.seconds(10),
@@ -65,52 +59,26 @@ export class EDAAppStack extends cdk.Stack {
       },
     };
 
-    const updateTable = new lambdanode.NodejsFunction(
-      this,
-      "updateTable",
-      {
-        runtime: lambda.Runtime.NODEJS_18_X,
+    const updateTable = new lambdanode.NodejsFunction(this, "updateTable", {
+        ...appCommonFnProps,
         entry: `${__dirname}/../lambdas/updateTable.ts`,
-        timeout: cdk.Duration.seconds(15),
-        memorySize: 128,
-        environment: {
-          TABLE_NAME: imageTable.tableName
-        }
       }
     );
 
-    const processImageFn = new lambdanode.NodejsFunction(
-      this,
-      "ProcessImageFn",
-      {
-        runtime: lambda.Runtime.NODEJS_18_X,
+    const processImageFn = new lambdanode.NodejsFunction(this,"ProcessImageFn", {
+        ...appCommonFnProps,
         entry: `${__dirname}/../lambdas/processImage.ts`,
-        timeout: cdk.Duration.seconds(15),
-        memorySize: 128,
-        environment: {
-          TABLE_NAME: imageTable.tableName
-        }
       }
     );
 
-    const rejectionMailerFn = new lambdanode.NodejsFunction(
-      this,
-      "rejectionMailer-function",
-      {
-        runtime: lambda.Runtime.NODEJS_18_X,
-        memorySize: 1024,
-        timeout: cdk.Duration.seconds(3),
+    const rejectionMailerFn = new lambdanode.NodejsFunction(this, "rejectionMailer-function", {
+        ...appCommonFnProps,
         entry: `${__dirname}/../lambdas/rejectionMailer.ts`,
       }
     );
 
-    const confirmationMailerFn = new lambdanode.NodejsFunction(
-      this,
-      "mailer-function",
-      {
-        runtime: lambda.Runtime.NODEJS_18_X,
-        memorySize: 1024,
-        timeout: cdk.Duration.seconds(3),
+    const confirmationMailerFn = new lambdanode.NodejsFunction(this,"mailer-function", {
+        ...appCommonFnProps,
         entry: `${__dirname}/../lambdas/confirmationMailer.ts`,
       }
     );
@@ -119,19 +87,17 @@ export class EDAAppStack extends cdk.Stack {
     const newImageTopic = new sns.Topic(this, "NewImageTopic", {
       displayName: "New Image topic",
     });
-
-    newImageTopic.addSubscription(
-      new subs.SqsSubscription(imageProcessQueue,
-        // {
-        //   filterPolicyWithMessageBody: {
-        //     // Define filters for the properties in the message body
-        //     Subject: new sns.Filter.s({
-        //        // Example: Only allow messages with Subject == "Amazon S3 Notification"
-        //     }),
-        //   }
-        // }
-      )
-    );
+    
+    newImageTopic.addSubscription(new subs.SqsSubscription(imageProcessQueue, {
+      filterPolicyWithMessageBody: {
+        Records: sns.FilterOrPolicy.policy({
+          eventName: sns.FilterOrPolicy.filter(
+            sns.SubscriptionFilter.stringFilter({
+              allowlist: ["ObjectCreated:Put", "ObjectRemoved:Delete"]
+          })),
+        }),
+      },
+    }));
 
     newImageTopic.addSubscription(
       new subs.LambdaSubscription(updateTable,
@@ -148,12 +114,12 @@ export class EDAAppStack extends cdk.Stack {
     // S3 --> SNS
     imagesBucket.addEventNotification(
       s3.EventType.OBJECT_CREATED,
-      new s3n.SnsDestination(newImageTopic) 
+      new s3n.SnsDestination(newImageTopic)
     );
 
     imagesBucket.addEventNotification(
       s3.EventType.OBJECT_REMOVED_DELETE,
-      new s3n.SnsDestination(newImageTopic) // New
+      new s3n.SnsDestination(newImageTopic) 
     )
 
     // SQS --> Lambda
@@ -171,7 +137,7 @@ export class EDAAppStack extends cdk.Stack {
     rejectionMailerFn.addEventSource(newImageRejectionMail);
     processImageFn.addEventSource(newImageEventSource);
 
-    confirmationMailerFn.addEventSource(   ///////
+    confirmationMailerFn.addEventSource(  
       new DynamoEventSource(imageTable, {
         startingPosition: StartingPosition.LATEST,
         batchSize: 5,
@@ -180,11 +146,10 @@ export class EDAAppStack extends cdk.Stack {
     )
 
     // Permissions
-
     imagesBucket.grantRead(processImageFn);
     imageTable.grantReadWriteData(processImageFn)
     imageTable.grantReadWriteData(updateTable)
-    imageTable.grantStreamRead(confirmationMailerFn); //
+    imageTable.grantStreamRead(confirmationMailerFn); 
 
     confirmationMailerFn.addToRolePolicy(
       new iam.PolicyStatement({
@@ -211,7 +176,6 @@ export class EDAAppStack extends cdk.Stack {
     );
 
     // Output
-
     new cdk.CfnOutput(this, "bucketName", {
       value: imagesBucket.bucketName,
     });

@@ -1,57 +1,37 @@
 import { SNSHandler } from "aws-lambda";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import {
-  DynamoDBDocumentClient,
-  GetCommand,
-  PutCommand,
-  UpdateCommand,
-  UpdateCommandInput,
-} from "@aws-sdk/lib-dynamodb";
+import { DynamoDBDocumentClient, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 
 const ddbDocClient = createDDbDocClient();
 
-export const handler: SNSHandler = async (event: any) => {
+export const handler: SNSHandler = async (event) => {
   console.log("SNS Event received:", JSON.stringify(event));
 
-  try {
-    for (const record of event.Records) {
-      const sns = record.Sns;
-      console.log("SNS Record:", JSON.stringify(sns));
+  for (const record of event.Records) {
+    try {
 
-      // Parse the message string into JSON
-      const message = JSON.parse(sns.Message);
-      console.log("Parsed Message:", message);
-
-      // Access values from the parsed message
+      const message = JSON.parse(record.Sns.Message);
       const id = message.id;
       const value = message.value;
-      console.log("ID:", id);
-      console.log("Value:", value);
-
-      // Access message attributes
-      const metadataType = sns.MessageAttributes.metadata_type?.Value;
-      console.log("Metadata Type:", metadataType);
+      const metadataType = record.Sns.MessageAttributes.metadata_type.Value;
 
       await ddbDocClient.send(
         new UpdateCommand({
           TableName: process.env.TABLE_NAME,
           Key: { imageId: id },
-          UpdateExpression: "SET #message = :message",
-          ExpressionAttributeNames: {
-            "#message": "message"
-          },
+          UpdateExpression: `SET ${metadataType} = :value`,
           ExpressionAttributeValues: {
-            ":message": value
+            ":value": value
           },
         })
       )
+
+      console.log("Item Updated:", id)
+    } catch (error) {
+      console.error("An Error occurred:", error)
     }
-  } catch (e) {
-      
   }
 }
-
-
 function createDDbDocClient() {
   const ddbClient = new DynamoDBClient({ region: process.env.REGION });
   const marshallOptions = {
