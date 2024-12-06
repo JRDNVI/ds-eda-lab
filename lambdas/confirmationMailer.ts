@@ -25,13 +25,12 @@ export const handler: DynamoDBStreamHandler = async (event: any) => {
   console.log("Event ", JSON.stringify(event));
 
   for (const record of event.Records) {
-    if (record.eventName === "REMOVE") {
-      return
-    }
-
-    const newImage = record.dynamodb?.NewImage;
+    if (record.eventName !== "INSERT") return
+    const newImage = record.dynamodb.NewImage;
     const imageId = newImage.imageId?.S;
-
+    if (!imageId) {
+      console.log("Image name not found");
+    }
     try {
       const { name, email, message }: ContactDetails = {
         name: "The Photo Album",
